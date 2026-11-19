@@ -1,34 +1,32 @@
 # VEmu Core Installer
 
-Manual-install workaround for the VEmu PS5 core installer.
+This is the PS5 core installer for VEmu. It is hosted here instead of Thunderstore.
 
-Thunderstore rejected binary-containing uploads as `Invalid submission`, so the public Thunderstore `VEmu_Addon` stays config-only. This repository hosts the installer separately for manual installation.
+The Thunderstore addon is config-only because uploads with DLLs and cores kept getting rejected. Without this installer, the Thunderstore ZIP is just config snippets.
 
 ## Why this is on GitHub
 
-The old config-only `VEmu_Addon` uploads worked on Thunderstore. When the PS5 core installer DLL was added, Thunderstore rejected those versions with `Invalid submission`.
+Thunderstore accepted the old config-only addon. When the PS5 core installer was added, the uploads were rejected with `Invalid submission`. That message did not say exactly what was wrong.
 
-`Invalid submission` means Thunderstore wanted a manual review. The message did not say exactly which file or rule caused it. Rather than keep guessing and keep uploading rejected versions, we split it:
+So the addon was split:
 
-- Thunderstore gets a clean config-only addon with no DLLs or cores.
-- GitHub hosts the installer as a manual download.
-- People who want the PS5 core installer can choose to install it themselves.
+- Thunderstore has the config-only ZIP.
+- GitHub has the installer.
+- You install the GitHub release by hand if you want the PS5 core part.
 
-This is a workaround to keep both parts available. It does not mean the installer is a virus or that the core is illegal. The installer is small and narrow: it verifies a SHA256 hash, copies the core only if it is missing, never overwrites, and writes a log. No ROMs, PKGs, BIOS files, firmware, or runtime downloads are included.
-
-If Thunderstore moderators later approve a binary version, this GitHub installer can stay as a fallback.
+This installer is not doing anything sneaky. It checks a SHA256 hash, copies one core file if it is missing, and writes a log. It does not overwrite existing files. No ROMs, PKGs, BIOS files, firmware, or runtime downloads are included.
 
 ## What it does
 
-On VotV launch, the installer:
+When VotV starts, the installer:
 
-1. Finds your VEmu `user_data_dir` from an installed VEmu `settings.ini`.
-2. Falls back to `%LOCALAPPDATA%\VEmu`.
-3. Verifies the bundled core SHA256.
-4. Copies `kytyps5_libretro.dll` into `<VEmu user data>\cores\` only if it is missing.
+1. Looks for your VEmu `user_data_dir` in an installed `settings.ini`.
+2. Uses `%LOCALAPPDATA%\VEmu` if it cannot find that setting.
+3. Checks the SHA256 of the bundled core.
+4. Copies `kytyps5_libretro.dll` to `<VEmu user data>\cores\` only if it is missing.
 5. Writes `VEmu-CoreInstaller.log` next to `VotV-Win64-Shipping.exe`.
 
-It never overwrites an existing core.
+If a core is already there, it leaves it alone.
 
 ## Requirements
 
@@ -37,24 +35,23 @@ It never overwrites an existing core.
 
 ## Install
 
-1. Close VotV.
-2. Download `releases/VEmu-CoreInstaller-1.0.0.zip` from this repository's Releases page.
-3. Extract it so this folder exists:
+1. Download `VEmu-CoreInstaller-1.0.0.zip` from the Releases page.
+2. Extract it so this folder exists:
 
    `<profile>\shimloader\mod\Theunknown404-VEmuCoreInstaller\`
 
-   On this machine that profile path is normally:
+   Your profile path will be different. On this machine it is:
 
    `C:\Users\tommy\AppData\Roaming\Thunderstore Mod Manager\DataFolder\VotV\profiles\Default\shimloader\mod\`
 
-4. Make sure these files exist after extraction:
+3. Check that these files are there:
 
    - `Theunknown404-VEmuCoreInstaller\enabled.txt`
    - `Theunknown404-VEmuCoreInstaller\dlls\main.dll`
    - `Theunknown404-VEmuCoreInstaller\core\kytyps5_libretro.dll`
 
-5. Start VotV.
-6. Check `VEmu-CoreInstaller.log` next to `VotV-Win64-Shipping.exe`.
+4. Start VotV.
+5. Check `VEmu-CoreInstaller.log` next to `VotV-Win64-Shipping.exe`.
 
 ## Verify a hash
 
@@ -72,7 +69,7 @@ Delete:
 
 `<profile>\shimloader\mod\Theunknown404-VEmuCoreInstaller\`
 
-Removing the mod does not delete the copied core. To remove the core manually, delete:
+Removing the mod does not delete the copied core. To remove the core too, delete:
 
 `<VEmu user data>\cores\kytyps5_libretro.dll`
 
@@ -84,6 +81,6 @@ Removing the mod does not delete the copied core. To remove the core manually, d
 - Source offer: `source/SOURCE_OFFER.md`
 - Exact local patch: `source/MODIFICATIONS.patch`
 - Build info: `source/BUILD_INFO.txt`
-- Clean corresponding source archive: `releases/KytyPS5-libretro-source-clean.zip`
+- Clean source archive: `releases/KytyPS5-libretro-source-clean.zip`
 
-Do not add these DLLs back into a Thunderstore package unless a moderator approves it.
+Do not put these DLLs back into a Thunderstore package unless a moderator approves it.
