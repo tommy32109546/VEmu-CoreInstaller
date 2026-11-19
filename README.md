@@ -82,5 +82,3 @@ Removing the mod does not delete the copied core. To remove the core too, delete
 - Exact local patch: `source/MODIFICATIONS.patch`
 - Build info: `source/BUILD_INFO.txt`
 - Clean source archive: `releases/KytyPS5-libretro-source-clean.zip`
-
-Do not put these DLLs back into a Thunderstore package unless a moderator approves it.
