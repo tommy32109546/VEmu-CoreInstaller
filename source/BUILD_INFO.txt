@@ -1,0 +1,20 @@
+VEmu PS5 core installer - source/build information
+
+Bundled binary: core/kytyps5_libretro.dll
+SHA256: 5F133297E11F91270B3F196BEDF3AF97E22D6847885EB037C18ED8168F21AAB9
+
+Upstream project: KytyPS5
+Upstream repository: https://github.com/KytyPS5/KytyPS5.git
+Local source directory was based on upstream commit: 2638b1b07613dc32a4708d2cd61a75711b84b6cf
+Upstream commit date: 2026-11-17T19:14:43+01:00
+Upstream commit subject: launcher: launch a game into a chosen activity from its context menu
+
+The complete source tree used for the local build is included in KytyPS5-libretro-source.zip.
+The exact local tracked-file modifications are included as MODIFICATIONS.patch at the root of that source tree.
+Local tracked-file modification summary: 17 files changed, 353 insertions(+), 7 deletions(-).
+
+The KytyPS5 LICENSE file is included in licenses/KytyPS5-LICENSE.txt and at the root of the source tree.
+Upstream GitHub labels the project GPL-2.0-only; the included LICENSE text is GNU GPL version 2.
+Third-party source directories and their license files are included under 3rdparty/ in the source archive.
+
+No ROMs, BIOS files, firmware files, or runtime downloads are included in this package.

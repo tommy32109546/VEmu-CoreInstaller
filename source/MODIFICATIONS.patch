@@ -1,0 +1,732 @@
+﻿diff --git a/CMakeLists.txt b/CMakeLists.txt
+index e2e3dcd..3b3a05f 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -345,6 +345,7 @@ endif()
+ 
+ set(inc_headers
+ 	${KYTY_SOURCE_DIR}
++	${CMAKE_CURRENT_SOURCE_DIR}/libretro
+ 	${KYTY_THIRD_PARTY_DIR}/VulkanMemoryAllocator/include
+ 	${KYTY_THIRD_PARTY_DIR}/SPIRV-Tools/include
+ 	${KYTY_THIRD_PARTY_DIR}/SPIRV-Headers/include
+@@ -359,7 +360,7 @@ set(inc_headers
+ if (KYTY_CLANG_CL)
+ 	list(APPEND kyty_emulator_link_libraries winpthread)
+ 	list(APPEND inc_headers
+-		${KYTY_THIRD_PARTY_DIR}/winpthread/include
++		C:/Users/tommy/AppData/Local/Temp/VEmu-PS4-Build/winpthread-static/mingw-w64-libraries/winpthreads/include
+ 	)
+ endif()
+ 
+@@ -933,6 +934,38 @@ endif()
+ target_link_libraries(kyty_emulator ${CMAKE_DL_LIBS})
+ target_include_directories(kyty_emulator PRIVATE ${inc_headers})
+ 
++if(WIN32)
++	add_library(kytyps5_libretro SHARED
++		"${CMAKE_CURRENT_SOURCE_DIR}/libretro/libretro_core.cpp"
++		${kyty_emulator_src}
++	)
++	target_compile_definitions(kytyps5_libretro PRIVATE KYTY_LIBRETRO_CORE)
++	target_link_libraries(kytyps5_libretro ${kyty_emulator_link_libraries})
++	target_link_libraries(kytyps5_libretro opengl32 iphlpapi setupapi ws2_32 dxgi ${CMAKE_DL_LIBS})
++	if(KYTY_CLANG_CL)
++		target_link_libraries(kytyps5_libretro onecore)
++		add_custom_command(TARGET kytyps5_libretro POST_BUILD
++			COMMAND ${CMAKE_COMMAND} -E copy_if_different
++				"${KYTY_THIRD_PARTY_DIR}/winpthread/bin/libwinpthread-1.dll"
++				$<TARGET_FILE_DIR:kytyps5_libretro>/libwinpthread-1.dll)
++	endif()
++	target_include_directories(kytyps5_libretro PRIVATE ${inc_headers})
++	set_target_properties(kytyps5_libretro PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS OFF)
++	add_custom_target(kyty_libretro_assets ALL
++		COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:kytyps5_libretro>/assets/sounds"
++		COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:kytyps5_libretro>/assets/cursors"
++		COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:kytyps5_libretro>/assets/fonts"
++		COMMAND ${CMAKE_COMMAND} -E copy_if_different "${KYTY_TROPHY_UNLOCK_SOUND}"
++			"$<TARGET_FILE_DIR:kytyps5_libretro>/assets/sounds/trophy-unlock.wav"
++		COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_CURRENT_SOURCE_DIR}/assets/cursors"
++			"$<TARGET_FILE_DIR:kytyps5_libretro>/assets/cursors"
++		COMMAND ${CMAKE_COMMAND} -E copy_if_different ${KYTY_NOTO_SANS_FONTS}
++			"$<TARGET_FILE_DIR:kytyps5_libretro>/assets/fonts"
++		VERBATIM)
++	add_dependencies(kytyps5_libretro kyty_libretro_assets)
++	install(TARGETS kytyps5_libretro DESTINATION .)
++endif()
++
+ clang_tidy_check(kyty_emulator "" "${check_headers}" "${inc_headers}")
+ 
+ include_what_you_use(kyty_emulator "${inc_headers}")
+diff --git a/src/common/emulatorConfig.cpp b/src/common/emulatorConfig.cpp
+index 9505f30..0910e7f 100644
+--- a/src/common/emulatorConfig.cpp
++++ b/src/common/emulatorConfig.cpp
+@@ -269,6 +269,10 @@ bool SkipNoticeScreen() {
+ 	return g_config->skip_notice_screen;
+ }
+ 
++bool LibretroBridgeEnabled() {
++	return g_config->libretro_bridge;
++}
++
+ const std::string& GetLaunchActivity() {
+ 	return g_config->launch_activity;
+ }
+diff --git a/src/common/emulatorConfig.h b/src/common/emulatorConfig.h
+index 1d1c4a0..5f8a3f3 100644
+--- a/src/common/emulatorConfig.h
++++ b/src/common/emulatorConfig.h
+@@ -107,6 +107,7 @@ struct ConfigOptions {
+ 	bool                   perf_overlay_enabled            = false;
+ 	bool                   playgo_hack_enabled         = false;
+ 	bool                   skip_notice_screen          = false;
++	bool                   libretro_bridge             = false;
+ 	std::string            launch_activity;
+ #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+ 	bool red_zone_protection_enabled = false;
+@@ -187,6 +188,7 @@ bool TrophyEnabled();
+ uint32_t GetTrophyDurationSeconds();
+ bool PlayGoHackEnabled();
+ bool SkipNoticeScreen();
++bool LibretroBridgeEnabled();
+ // Activity ID of the one-shot launchActivity game intent; empty sends none.
+ const std::string& GetLaunchActivity();
+ #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+diff --git a/src/common/platform/sysWindowsDbg.cpp b/src/common/platform/sysWindowsDbg.cpp
+index c6108d7..77de1c5 100644
+--- a/src/common/platform/sysWindowsDbg.cpp
++++ b/src/common/platform/sysWindowsDbg.cpp
+@@ -21,8 +21,14 @@ sys_dbg_stack_info_t SysStackUsage() {
+ 	PVOID reserved = mbi.AllocationBase;
+ 	ss             = VirtualQuery(reserved, &mbi, sizeof(mbi));
+ 	EXIT_IF(ss == 0);
++	if (mbi.State == MEM_COMMIT && (mbi.Protect & PAGE_GUARD) == 0) {
++		return {.reserved_addr = reinterpret_cast<uintptr_t>(reserved), .guard_addr = 0, .guard_size = 0};
++	}
+ 	ss = VirtualQuery(static_cast<char*>(reserved) + mbi.RegionSize, &mbi, sizeof(mbi));
+ 	EXIT_IF(ss == 0);
++	if (mbi.State == MEM_COMMIT && (mbi.Protect & PAGE_GUARD) == 0) {
++		return {.reserved_addr = reinterpret_cast<uintptr_t>(reserved), .guard_addr = 0, .guard_size = 0};
++	}
+ 	return {.reserved_addr = reinterpret_cast<uintptr_t>(reserved),
+ 	        .guard_addr    = reinterpret_cast<uintptr_t>(mbi.BaseAddress),
+ 	        .guard_size    = mbi.RegionSize};
+diff --git a/src/emulator.cpp b/src/emulator.cpp
+index e93e98c..97fca57 100644
+--- a/src/emulator.cpp
++++ b/src/emulator.cpp
+@@ -26,8 +26,13 @@
+ #include "loader/runtimeLinker.h"
+ #include "loader/systemContent.h"
+ 
++#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
++#include <windows.h>
++#endif
++
+ #include <cstdlib>
+ #include <filesystem>
++#include <memory>
+ #include <thread>
+ 
+ namespace Emulator {
+@@ -131,10 +136,32 @@ static void LoadElf(const std::filesystem::path& elf, bool dbg_print_reloc = fal
+ 	}
+ }
+ 
++#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
++struct ExecuteThreadContext {
++	std::filesystem::path game_patch;
++};
++
++static DWORD WINAPI ExecuteThread(LPVOID parameter) {
++	std::unique_ptr<ExecuteThreadContext> context(static_cast<ExecuteThreadContext*>(parameter));
++	Common::Singleton<Loader::RuntimeLinker>::Instance()->Execute(context->game_patch);
++	return 0;
++}
++#endif
++
+ static void Execute(const std::filesystem::path& game_patch) {
++#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
++	auto* context = new ExecuteThreadContext {game_patch};
++	const HANDLE thread = CreateThread(nullptr, 0x200000, ExecuteThread, context, 0, nullptr);
++	if (thread == nullptr) {
++		delete context;
++		EXIT("CreateThread failed: %lu\n", GetLastError());
++	}
++	CloseHandle(thread);
++#else
+ 	std::thread([game_patch] {
+ 		Common::Singleton<Loader::RuntimeLinker>::Instance()->Execute(game_patch);
+ 	}).detach();
++#endif
+ 	Libs::Graphics::WindowRun();
+ 	std::quick_exit(0);
+ }
+diff --git a/src/graphics/host_gpu/renderer/pipeline/pipelineSerialization.cpp b/src/graphics/host_gpu/renderer/pipeline/pipelineSerialization.cpp
+index 0fccf60..43d1aaa 100644
+--- a/src/graphics/host_gpu/renderer/pipeline/pipelineSerialization.cpp
++++ b/src/graphics/host_gpu/renderer/pipeline/pipelineSerialization.cpp
+@@ -6,6 +6,7 @@
+ #include "graphics/host_gpu/vulkanCommon.h"
+ #include "graphics/shader/recompiler/ShaderRecompiler.h"
+ #include "graphics/shader/recompiler/ir/Serialize.h"
++#include "libs/libretroBridge.h"
+ 
+ #include <algorithm>
+ #include <chrono>
+@@ -44,6 +45,15 @@ struct Frame {
+ // Changes with every build, so records never meet code that encodes them differently. Zero when
+ // the executable cannot be found.
+ uint64_t BuildStamp() {
++	const char* bridge_base = Kyty::LibretroBridge::BaseDir();
++	if (bridge_base != nullptr) {
++		std::error_code error;
++		const auto      time = std::filesystem::last_write_time(
++		                     std::filesystem::path(bridge_base) / "kytyps5_libretro.dll", error)
++		                     .time_since_epoch()
++		                     .count();
++		return error ? 0 : static_cast<uint64_t>(time);
++	}
+ #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+ 	std::array<wchar_t, 32768> name {};
+ 	GetModuleFileNameW(nullptr, name.data(), static_cast<DWORD>(name.size()));
+diff --git a/src/graphics/presentation/systemOverlay.cpp b/src/graphics/presentation/systemOverlay.cpp
+index efee498..f9681b2 100644
+--- a/src/graphics/presentation/systemOverlay.cpp
++++ b/src/graphics/presentation/systemOverlay.cpp
+@@ -16,6 +16,7 @@
+ #include "imgui_internal.h"
+ #include "libs/controller.h"
+ #include "libs/dialog.h"
++#include "libs/libretroBridge.h"
+ #include "libs/ime.h"
+ #include "libs/imeDialog.h"
+ #include "loader/systemContent.h"
+@@ -844,6 +845,77 @@ bool ProcessSystemOverlayInput(const SDL_Event& event) {
+ 	}
+ }
+ 
++namespace {
++
++int PadButtonToGamepadButton(uint32_t pad_button) {
++	switch (pad_button) {
++		case Controller::PAD_BUTTON_L3: return SDL_GAMEPAD_BUTTON_LEFT_STICK;
++		case Controller::PAD_BUTTON_R3: return SDL_GAMEPAD_BUTTON_RIGHT_STICK;
++		case Controller::PAD_BUTTON_OPTIONS: return SDL_GAMEPAD_BUTTON_START;
++		case Controller::PAD_BUTTON_UP: return SDL_GAMEPAD_BUTTON_DPAD_UP;
++		case Controller::PAD_BUTTON_RIGHT: return SDL_GAMEPAD_BUTTON_DPAD_RIGHT;
++		case Controller::PAD_BUTTON_DOWN: return SDL_GAMEPAD_BUTTON_DPAD_DOWN;
++		case Controller::PAD_BUTTON_LEFT: return SDL_GAMEPAD_BUTTON_DPAD_LEFT;
++		case Controller::PAD_BUTTON_L1: return SDL_GAMEPAD_BUTTON_LEFT_SHOULDER;
++		case Controller::PAD_BUTTON_R1: return SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER;
++		case Controller::PAD_BUTTON_TRIANGLE: return SDL_GAMEPAD_BUTTON_NORTH;
++		case Controller::PAD_BUTTON_CIRCLE: return SDL_GAMEPAD_BUTTON_EAST;
++		case Controller::PAD_BUTTON_CROSS: return SDL_GAMEPAD_BUTTON_SOUTH;
++		case Controller::PAD_BUTTON_SQUARE: return SDL_GAMEPAD_BUTTON_WEST;
++		case Controller::PAD_BUTTON_TOUCH_PAD: return SDL_GAMEPAD_BUTTON_TOUCHPAD;
++		default: return SDL_GAMEPAD_BUTTON_INVALID;
++	}
++}
++
++int PadAxisToGamepadAxis(uint32_t axis) {
++	switch (axis) {
++		case 0: return SDL_GAMEPAD_AXIS_LEFTX;
++		case 1: return SDL_GAMEPAD_AXIS_LEFTY;
++		case 2: return SDL_GAMEPAD_AXIS_RIGHTX;
++		case 3: return SDL_GAMEPAD_AXIS_RIGHTY;
++		case 4: return SDL_GAMEPAD_AXIS_LEFT_TRIGGER;
++		case 5: return SDL_GAMEPAD_AXIS_RIGHT_TRIGGER;
++		default: return SDL_GAMEPAD_AXIS_INVALID;
++	}
++}
++
++int PadAxisValueToGamepadAxisValue(uint32_t axis, int value) {
++	const int clamped = std::clamp(value, 0, 255);
++	if (axis == 4 || axis == 5) {
++		return clamped * 128;
++	}
++	return std::clamp((clamped - 128) * 257, -32768, 32767);
++}
++
++} // namespace
++
++void ProcessLibretroOverlayButton(uint32_t pad_button, bool down) {
++	if (!g_input_active || !g_input_controller) {
++		return;
++	}
++	const int gamepad_button = PadButtonToGamepadButton(pad_button);
++	if (gamepad_button == SDL_GAMEPAD_BUTTON_INVALID) {
++		return;
++	}
++	QueueInput({InputKind::Button, g_input_session, gamepad_button, down ? 1.0f : 0.0f, 0.0f});
++}
++
++void ProcessLibretroOverlayAxis(uint32_t axis, int value) {
++	if (!g_input_active || !g_input_controller) {
++		return;
++	}
++	const int gamepad_axis = PadAxisToGamepadAxis(axis);
++	if (gamepad_axis == SDL_GAMEPAD_AXIS_INVALID) {
++		return;
++	}
++	QueueInput({InputKind::Axis, g_input_session, gamepad_axis,
++	            static_cast<float>(PadAxisValueToGamepadAxisValue(axis, value)), 0.0f});
++}
++
++bool IsSystemOverlayControllerCaptureActive() noexcept {
++	return g_input_active && g_input_controller;
++}
++
+ void NotifyTrophyUnlocked(std::string_view name, int32_t grade,
+                           std::span<const std::byte> icon_png) {
+ 	std::scoped_lock lock(g_trophy_notification_mutex);
+@@ -927,7 +999,10 @@ struct SystemOverlay::Impl {
+ 				LOGF("[Trophy] could not initialize audio: %s\n", SDL_GetError());
+ 				return;
+ 			}
+-			const char* base_path = SDL_GetBasePath();
++			const char* base_path = Kyty::LibretroBridge::BaseDir();
++			if (base_path == nullptr) {
++				base_path = SDL_GetBasePath();
++			}
+ 			if (base_path == nullptr) {
+ 				LOGF("[Trophy] could not locate sound: %s\n", SDL_GetError());
+ 				return;
+@@ -958,7 +1033,10 @@ struct SystemOverlay::Impl {
+ 	}
+ 
+ 	std::unique_ptr<ImTextureData> LoadTouchCursorImage(std::string_view filename) {
+-		const char* base_path = SDL_GetBasePath();
++		const char* base_path = Kyty::LibretroBridge::BaseDir();
++		if (base_path == nullptr) {
++			base_path = SDL_GetBasePath();
++		}
+ 		if (base_path == nullptr) {
+ 			LOGF("Could not locate the emulator folder for touchpad cursor images: %s\n",
+ 			     SDL_GetError());
+diff --git a/src/graphics/presentation/systemOverlay.h b/src/graphics/presentation/systemOverlay.h
+index 7a3c1e9..80339bf 100644
+--- a/src/graphics/presentation/systemOverlay.h
++++ b/src/graphics/presentation/systemOverlay.h
+@@ -5,6 +5,7 @@
+ #include "graphics/host_gpu/vulkanCommon.h"
+ 
+ #include <cstddef>
++#include <cstdint>
+ #include <filesystem>
+ #include <memory>
+ #include <span>
+@@ -27,6 +28,9 @@ void                     HideSplashScreen();
+ void                     InitializeSystemOverlayInput(SDL_Window* window);
+ void                     ShutdownSystemOverlayInput();
+ bool                     ProcessSystemOverlayInput(const SDL_Event& event);
++void                     ProcessLibretroOverlayButton(uint32_t pad_button, bool down);
++void                     ProcessLibretroOverlayAxis(uint32_t axis, int value);
++bool                     IsSystemOverlayControllerCaptureActive() noexcept;
+ SystemOverlayVisualState GetSystemOverlayVisualState() noexcept;
+ void                     NotifyTrophyUnlocked(std::string_view name, int32_t grade,
+                                               std::span<const std::byte> icon_png);
+diff --git a/src/graphics/presentation/window/swapchain.cpp b/src/graphics/presentation/window/swapchain.cpp
+index b22c552..3f585ca 100644
+--- a/src/graphics/presentation/window/swapchain.cpp
++++ b/src/graphics/presentation/window/swapchain.cpp
+@@ -17,6 +17,7 @@
+ #include "graphics/presentation/systemOverlay.h"
+ #include "graphics/presentation/videoOut.h"
+ #include "graphics/presentation/window/windowInternal.h"
++#include "libs/libretroBridge.h"
+ 
+ #include <algorithm>
+ #include <array>
+@@ -246,6 +247,7 @@ public:
+ 	                               const Presenter::Layer& overlay, bool draw_system_overlay);
+ 	uint64_t Submit(CommandScheduler& scheduler);
+ 	[[nodiscard]] Status Present();
++	void PublishReadback();
+ 
+ 	[[nodiscard]] uint32_t ImageCount() const noexcept {
+ 		return static_cast<uint32_t>(m_images.size());
+@@ -283,8 +285,15 @@ private:
+ 	vk::PipelineLayout             m_overlay_layout      = nullptr;
+ 	vk::Pipeline                   m_overlay_pipeline    = nullptr;
+ 	vk::Sampler                    m_overlay_sampler     = nullptr;
++	vk::Buffer                     m_readback_buffer     = nullptr;
++	VmaAllocation                  m_readback_allocation = nullptr;
++	void*                          m_readback_data       = nullptr;
++	uint64_t                       m_readback_size       = 0;
++	bool                           m_readback_bgra       = false;
+ 	uint32_t                       m_image_index         = 0;
+ 	uint32_t                       m_frame_index         = 0;
++
++	void CreateReadback();
+ };
+ 
+ struct Presenter::Impl {
+@@ -346,7 +355,10 @@ vk::SurfaceFormatKHR Swapchain::SelectFormat() {
+ 		           vk::FormatFeatureFlagBits::eBlitDst);
+ 	});
+ 	m_hdr_supported        = Config::HdrEnabled() && hdr_format != formats.end();
+-	m_hdr_active           = m_hdr_requested && IsHdrSupported();
++	if (Config::LibretroBridgeEnabled()) {
++		m_hdr_supported = false;
++	}
++	m_hdr_active = m_hdr_requested && IsHdrSupported();
+ 	if (m_hdr_active) {
+ 		return *hdr_format;
+ 	}
+@@ -430,6 +442,9 @@ void Swapchain::Create() {
+ 	create_info.imageArrayLayers = 1;
+ 	create_info.imageUsage =
+ 	    vk::ImageUsageFlagBits::eColorAttachment | vk::ImageUsageFlagBits::eTransferDst;
++	if (Config::LibretroBridgeEnabled()) {
++		create_info.imageUsage |= vk::ImageUsageFlagBits::eTransferSrc;
++	}
+ 	create_info.imageSharingMode = vk::SharingMode::eExclusive;
+ 	create_info.preTransform     = transform;
+ 	create_info.compositeAlpha   = composite;
+@@ -491,6 +506,43 @@ void Swapchain::Create() {
+ 		    graphics.device.createSemaphore(&semaphore_info, nullptr, &m_render_complete[i]),
+ 		    "create swapchain render-complete semaphore");
+ 	}
++	CreateReadback();
++}
++
++void Swapchain::CreateReadback() {
++	if (!Config::LibretroBridgeEnabled() || m_readback_buffer != nullptr) {
++		return;
++	}
++	auto& graphics = m_window.graphic_ctx;
++	m_readback_size =
++	    static_cast<uint64_t>(m_extent.width) * m_extent.height * 4;
++	m_readback_bgra = m_format == vk::Format::eB8G8R8A8Unorm;
++	vk::BufferCreateInfo buffer {};
++	buffer.size  = m_readback_size;
++	buffer.usage = vk::BufferUsageFlagBits::eTransferDst;
++	VmaAllocationCreateInfo allocation {};
++	allocation.usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST;
++	allocation.flags = VMA_ALLOCATION_CREATE_MAPPED_BIT |
++	                   VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT;
++	VmaAllocationInfo mapped {};
++	VkBuffer          native_buffer = VK_NULL_HANDLE;
++	if (vmaCreateBuffer(graphics.allocator, static_cast<const VkBufferCreateInfo*>(buffer),
++	                    &allocation, &native_buffer, &m_readback_allocation, &mapped) !=
++	    VK_SUCCESS) {
++		EXIT("could not allocate libretro frame readback buffer\n");
++	}
++	m_readback_buffer = native_buffer;
++	m_readback_data = mapped.pMappedData;
++}
++
++void Swapchain::PublishReadback() {
++	if (m_readback_buffer == nullptr || m_readback_data == nullptr) {
++		return;
++	}
++	auto& graphics = m_window.graphic_ctx;
++	vmaInvalidateAllocation(graphics.allocator, m_readback_allocation, 0, m_readback_size);
++	Kyty::LibretroBridge::PushFrame(m_readback_data, m_extent.width, m_extent.height,
++	                                m_readback_bgra ? 1 : 0);
+ }
+ 
+ Swapchain::~Swapchain() {
+@@ -508,6 +560,13 @@ void Swapchain::Destroy() {
+ 		Common::LockGuard queue_lock(graphics.queue_mutex);
+ 		RequireVulkanSuccess(graphics.queue.waitIdle(), "wait for swapchain queue");
+ 	}
++	if (m_readback_buffer != nullptr) {
++		vmaDestroyBuffer(graphics.allocator, m_readback_buffer, m_readback_allocation);
++		m_readback_buffer     = nullptr;
++		m_readback_allocation = nullptr;
++		m_readback_data       = nullptr;
++		m_readback_size       = 0;
++	}
+ 	if (m_system_overlay != nullptr) {
+ 		m_system_overlay->ReleaseVulkan();
+ 	}
+@@ -887,6 +946,65 @@ void Swapchain::RecordPresentCommands(CommandBuffer& command, Presenter::Frame*
+ 		                           vk::DependencyFlagBits::eByRegion, 0, nullptr, 0, nullptr, 1,
+ 		                           &to_present);
+ 	}
++	if (m_readback_buffer == nullptr) {
++		return;
++	}
++	vk::BufferMemoryBarrier readback_to_transfer {};
++	readback_to_transfer.sType         = vk::StructureType::eBufferMemoryBarrier;
++	readback_to_transfer.srcAccessMask = vk::AccessFlagBits::eHostRead;
++	readback_to_transfer.dstAccessMask = vk::AccessFlagBits::eTransferWrite;
++	readback_to_transfer.buffer        = m_readback_buffer;
++	readback_to_transfer.offset        = 0;
++	readback_to_transfer.size          = VK_WHOLE_SIZE;
++	vk_command.pipelineBarrier(vk::PipelineStageFlagBits::eHost, vk::PipelineStageFlagBits::eTransfer,
++	                           vk::DependencyFlags {}, 0, nullptr, 1, &readback_to_transfer, 0,
++	                           nullptr);
++
++	vk::ImageMemoryBarrier to_readback {};
++	to_readback.sType                           = vk::StructureType::eImageMemoryBarrier;
++	to_readback.srcAccessMask                   = vk::AccessFlagBits::eMemoryRead;
++	to_readback.dstAccessMask                   = vk::AccessFlagBits::eTransferRead;
++	to_readback.oldLayout                       = vk::ImageLayout::ePresentSrcKHR;
++	to_readback.newLayout                       = vk::ImageLayout::eTransferSrcOptimal;
++	to_readback.srcQueueFamilyIndex             = VK_QUEUE_FAMILY_IGNORED;
++	to_readback.dstQueueFamilyIndex             = VK_QUEUE_FAMILY_IGNORED;
++	to_readback.image                           = m_images[m_image_index];
++	to_readback.subresourceRange.aspectMask     = vk::ImageAspectFlagBits::eColor;
++	to_readback.subresourceRange.baseMipLevel   = 0;
++	to_readback.subresourceRange.levelCount     = 1;
++	to_readback.subresourceRange.baseArrayLayer = 0;
++	to_readback.subresourceRange.layerCount     = 1;
++	vk_command.pipelineBarrier(vk::PipelineStageFlagBits::eAllCommands,
++	                           vk::PipelineStageFlagBits::eTransfer, vk::DependencyFlags {}, 0,
++	                           nullptr, 0, nullptr, 1, &to_readback);
++
++	vk::BufferImageCopy copy {};
++	copy.bufferOffset                      = 0;
++	copy.bufferRowLength                   = 0;
++	copy.bufferImageHeight                 = 0;
++	copy.imageSubresource.aspectMask       = vk::ImageAspectFlagBits::eColor;
++	copy.imageSubresource.mipLevel         = 0;
++	copy.imageSubresource.baseArrayLayer   = 0;
++	copy.imageSubresource.layerCount       = 1;
++	copy.imageOffset                       = {0, 0, 0};
++	copy.imageExtent                       = {m_extent.width, m_extent.height, 1};
++	vk_command.copyImageToBuffer(m_images[m_image_index], vk::ImageLayout::eTransferSrcOptimal,
++	                             m_readback_buffer, 1, &copy);
++
++	vk::BufferMemoryBarrier readback_to_host = readback_to_transfer;
++	readback_to_host.srcAccessMask           = vk::AccessFlagBits::eTransferWrite;
++	readback_to_host.dstAccessMask           = vk::AccessFlagBits::eHostRead;
++	vk_command.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer, vk::PipelineStageFlagBits::eHost,
++	                           vk::DependencyFlags {}, 0, nullptr, 1, &readback_to_host, 0,
++	                           nullptr);
++
++	to_readback.srcAccessMask = vk::AccessFlagBits::eTransferRead;
++	to_readback.dstAccessMask = vk::AccessFlagBits::eMemoryRead;
++	to_readback.oldLayout     = vk::ImageLayout::eTransferSrcOptimal;
++	to_readback.newLayout     = vk::ImageLayout::ePresentSrcKHR;
++	vk_command.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer,
++	                           vk::PipelineStageFlagBits::eAllCommands, vk::DependencyFlags {}, 0,
++	                           nullptr, 0, nullptr, 1, &to_readback);
+ }
+ 
+ uint64_t Swapchain::Submit(CommandScheduler& scheduler) {
+@@ -1087,6 +1205,8 @@ void Presenter::Impl::Present() {
+ 			RecoverSwapchain(status);
+ 			continue;
+ 		}
++		present_scheduler.Wait(tick);
++		swapchain.PublishReadback();
+ 
+ 		presented_overlay_revision.store(overlay_visual.revision, std::memory_order_release);
+ 		window.loop.presented_frames.fetch_add(1, std::memory_order_relaxed);
+diff --git a/src/graphics/presentation/window/vulkanWindow.cpp b/src/graphics/presentation/window/vulkanWindow.cpp
+index c3190ec..724b6c5 100644
+--- a/src/graphics/presentation/window/vulkanWindow.cpp
++++ b/src/graphics/presentation/window/vulkanWindow.cpp
+@@ -315,6 +315,11 @@ static void VulkanFindPhysicalDevice(vk::Instance instance, vk::SurfaceKHR surfa
+ 			      vk::ImageUsageFlagBits::eTransferDst)) {
+ 				reject("Surface cannot be destination of blit");
+ 			}
++			if (Config::LibretroBridgeEnabled() &&
++			    !(candidate_capabilities.capabilities.supportedUsageFlags &
++			      vk::ImageUsageFlagBits::eTransferSrc)) {
++				reject("Surface cannot be source of libretro readback");
++			}
+ 		}
+ 
+ 		const auto check_format = [&](vk::Format format, vk::FormatFeatureFlags features,
+diff --git a/src/graphics/presentation/window/window.cpp b/src/graphics/presentation/window/window.cpp
+index e54e3ac..38eb640 100644
+--- a/src/graphics/presentation/window/window.cpp
++++ b/src/graphics/presentation/window/window.cpp
+@@ -21,6 +21,7 @@
+ #include "graphics/presentation/window/windowInternal.h"
+ #include "kytyGitVersion.h"
+ #include "libs/controller.h"
++#include "libs/libretroBridge.h"
+ #include "loader/systemContent.h"
+ 
+ #include <SDL3/SDL.h>
+@@ -781,6 +782,19 @@ void WindowContext::Run() {
+ 	}
+ }
+ 
++void WindowContext::RunLibretro() {
++	Common::Timer timer;
++	loop.event     = {};
++	loop.need_exit = false;
++	while (!Kyty::LibretroBridge::ShouldQuit()) {
++		if (HostInputWaitEvent(&loop.event, 2)) {
++			ProcessEvent(timer.GetTimeS());
++		}
++		Kyty::LibretroBridge::PumpInput();
++	}
++	loop.need_exit = true;
++}
++
+ static void WindowCreate(WindowContext& context) {
+ 	EXIT_IF(context.window != nullptr);
+ 	EXIT_IF(context.graphic_ctx.screen_width == 0);
+@@ -842,6 +856,9 @@ static void WindowCreate(WindowContext& context) {
+ 
+ uint32_t WindowContext::InitialWindowFlags(bool fullscreen) noexcept {
+ 	auto flags = static_cast<uint32_t>(SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE);
++	if (Config::LibretroBridgeEnabled()) {
++		flags |= static_cast<uint32_t>(SDL_WINDOW_HIDDEN);
++	}
+ 	if (fullscreen) {
+ 		flags |= static_cast<uint32_t>(SDL_WINDOW_FULLSCREEN);
+ 	}
+@@ -868,7 +885,11 @@ void WindowRun() {
+ 	KYTY_PROFILER_THREAD("Thread_Window");
+ 	EXIT_IF(g_window == nullptr);
+ 
+-	g_window->Run();
++	if (Config::LibretroBridgeEnabled()) {
++		g_window->RunLibretro();
++	} else {
++		g_window->Run();
++	}
+ 	Common::LockGuard lock(g_window->render_context->GetMutex());
+ 	g_window->render_context->GetPipelineCache().Save();
+ }
+diff --git a/src/graphics/presentation/window/windowInternal.h b/src/graphics/presentation/window/windowInternal.h
+index 493d9c7..f80c127 100644
+--- a/src/graphics/presentation/window/windowInternal.h
++++ b/src/graphics/presentation/window/windowInternal.h
+@@ -48,6 +48,7 @@ struct WindowContext {
+ 	void ProcessDisplayEvent(const SDL_DisplayEvent& event);
+ 	void ProcessEvent(double time_seconds);
+ 	void Run();
++	void RunLibretro();
+ 
+ 	GraphicContext                 graphic_ctx;
+ 	SDL_Window*                    window        = nullptr;
+diff --git a/src/kernel/pthread.cpp b/src/kernel/pthread.cpp
+index 6a9b9e3..ccfee61 100644
+--- a/src/kernel/pthread.cpp
++++ b/src/kernel/pthread.cpp
+@@ -64,6 +64,10 @@
+ #undef pthread_attr_getguardsize
+ #endif
+ 
++#ifdef pthread_attr_setguardsize
++#undef pthread_attr_setguardsize
++#endif
++
+ namespace Libs {
+ 
+ namespace LibcInternalExt {
+@@ -82,7 +86,7 @@ LIB_NAME("libkernel", "libkernel");
+ 
+ constexpr int      KEYS_MAX                = 256;
+ constexpr int      DESTRUCTOR_ITERATIONS   = 4;
+-constexpr size_t   PTHREAD_STACK_DEFAULT   = 0x100000;
++constexpr size_t   PTHREAD_STACK_DEFAULT   = 0x400000;
+ constexpr size_t   GUEST_PTHREAD_STACK_MIN = 0x4000;
+ constexpr size_t   PTHREAD_STACK_PAGE      = 0x4000;
+ constexpr size_t   PTHREAD_STACK_INITIAL   = 0x200000;
+diff --git a/src/libs/audio.cpp b/src/libs/audio.cpp
+index 05d50e2..adac29e 100644
+--- a/src/libs/audio.cpp
++++ b/src/libs/audio.cpp
+@@ -10,6 +10,7 @@
+ #include "libs/controller.h"
+ #include "libs/dualSenseHaptics.h"
+ #include "libs/errno.h"
++#include "libs/libretroBridge.h"
+ #include "libs/libs.h"
+ 
+ #include <SDL3/SDL.h>
+@@ -269,6 +270,26 @@ bool Audio::OpenSdlDevice(PortOut* port) {
+ 		return false;
+ 	}
+ 
++	if (Config::LibretroBridgeEnabled()) {
++		SDL_AudioSpec source {};
++		source.freq     = static_cast<int>(port->freq);
++		source.format   = SdlFormat(port->format);
++		source.channels = static_cast<int>(OutputChannels(*port));
++		SDL_AudioSpec target {};
++		target.freq     = 48000;
++		target.format   = SDL_AUDIO_S16;
++		target.channels = 2;
++		port->stream    = SDL_CreateAudioStream(&source, &target);
++		if (port->stream == nullptr) {
++			LOGF("AudioOut: SDL_CreateAudioStream failed: %s\n", SDL_GetError());
++			SDL_QuitSubSystem(SDL_INIT_AUDIO);
++			return false;
++		}
++		Kyty::LibretroBridge::AddAudioStream(port->stream);
++		LOGF("AudioOut: opened libretro stream (%d Hz, %d ch)\n", source.freq, source.channels);
++		return true;
++	}
++
+ 	SDL_AudioSpec desired {};
+ 	desired.freq     = static_cast<int>(port->freq);
+ 	desired.format   = SdlFormat(port->format);
+@@ -298,6 +319,7 @@ void Audio::CloseSdlDevice(PortOut* port) {
+ 	port->haptics = nullptr;
+ 
+ 	if (port->stream != nullptr) {
++		Kyty::LibretroBridge::RemoveAudioStream(port->stream);
+ 		SDL_DestroyAudioStream(port->stream);
+ 		SDL_QuitSubSystem(SDL_INIT_AUDIO);
+ 	}
+diff --git a/src/libs/libFont.cpp b/src/libs/libFont.cpp
+index 0917a73..555243f 100644
+--- a/src/libs/libFont.cpp
++++ b/src/libs/libFont.cpp
+@@ -4,6 +4,7 @@
+ #include "common/logging/log.h"
+ #include "common/stringUtils.h"
+ #include "libs/errno.h"
++#include "libs/libretroBridge.h"
+ #include "libs/libs.h"
+ #include "loader/symbolDatabase.h"
+ 
+@@ -683,7 +684,10 @@ static std::vector<uint8_t> read_file_bytes(const std::filesystem::path& path) {
+ }
+ 
+ static std::vector<uint8_t> load_fallback_font_data(const char* file_name) {
+-	const char* base_path = SDL_GetBasePath();
++	const char* base_path = Kyty::LibretroBridge::BaseDir();
++	if (base_path == nullptr) {
++		base_path = SDL_GetBasePath();
++	}
+ 	if (base_path == nullptr) {
+ 		LOGF("Font: SDL_GetBasePath failed: %s\n", SDL_GetError());
+ 		return {};
+diff --git a/src/loader/runtimeLinker.cpp b/src/loader/runtimeLinker.cpp
+index 4dc8397..56a941a 100644
+--- a/src/loader/runtimeLinker.cpp
++++ b/src/loader/runtimeLinker.cpp
+@@ -1258,6 +1258,9 @@ void RuntimeLinker::Execute(const std::filesystem::path& game_patch) {
+ 	size_t expanded_size = 0;
+ 	while (expanded_size < static_cast<size_t>(768) * 1024) {
+ 		const auto stack = SysStackUsage();
++		if (stack.guard_addr == 0 || stack.guard_size == 0) {
++			break;
++		}
+ 		*reinterpret_cast<uint32_t*>(stack.guard_addr) = 0;
+ 		expanded_size += stack.guard_size;
+ 	}
+diff --git a/src/main.cpp b/src/main.cpp
+index 8943d8a..f9410f9 100644
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -96,6 +96,7 @@ static void PrintUsage() {
+ 	::printf("  --perf-overlay                       Show the performance panel (F2 or Cmd+P).\n");
+ 	::printf("  --playgo-hack                        Report 1000 PlayGo chunks without chunk metadata.\n");
+ 	::printf("  --skip-notice-screen                 Skip startup logos and notices in supported games.\n");
++	::printf("  --libretro-bridge                    Run hidden with the libretro frame/audio/input bridge.\n");
+ 	::printf("  --launch-activity <id>               Launch into this activity (1-32 printable ASCII chars).\n");
+ #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+ 	::printf("  --redzone                            Protect the guest SysV red zone.\n");
+@@ -223,6 +224,7 @@ static constexpr Flag FLAGS[] = {
+     {"--perf-overlay", &ConfigOptions::perf_overlay_enabled},
+     {"--playgo-hack", &ConfigOptions::playgo_hack_enabled},
+     {"--skip-notice-screen", &ConfigOptions::skip_notice_screen},
++    {"--libretro-bridge", &ConfigOptions::libretro_bridge},
+ #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+     {"--redzone", &ConfigOptions::red_zone_protection_enabled},
+ #endif
